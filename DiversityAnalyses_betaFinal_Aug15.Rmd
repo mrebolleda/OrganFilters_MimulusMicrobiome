@@ -1,0 +1,786 @@
+##Paper: 
+###Code by: María Rebolleda Gómez
+####Last updated: September 2018
+
+Set directory, load packages and export data. 
+```{r}
+library("vegan")
+library("phyloseq")
+library("ggplot2")
+library("tidyr")
+library(plyr)
+library(VennDiagram)
+library(picante)
+library(ape)
+
+setwd("~/Dropbox/Rebolleda_Gomez_AshmanLab/Mimulus/Analyses/")
+
+treefile = "16s/rep_set.tre"
+taxa=as.matrix(read.table("16s/Taxa.txt",sep="\t"))
+colnames(taxa)=c("Kingdom","Phyllum","Class","Order","Family","Genus","Species")
+
+#Open processed reads from OTUtable_Processing
+OTU_tabl=read.table(file="16s/OTU_rarefied_organs.txt",sep="\t",check.names = F)
+
+#Open sample information for all samples (mymap) and only organ washes (metadata)
+mymap <- import_qiime_sample_data("../Raw/MIGU_metadata.txt")
+metadata=read.table(file="Metadata_subset.txt",sep="\t")
+metadata$SampleID=as.character(metadata$SampleID)
+rownames(metadata)=metadata$SampleID
+
+
+#Open flower data
+fl1=read.csv("../Raw/FlowerAbundance_170510.csv")
+fl2=read.csv("../Raw/FlowerAbundance_170516_Block2.csv")
+
+#Open pollinator data
+pol=read.csv("../Raw/PollinatorData_v1.csv")
+
+#Color palettes
+cols=c("#e59423","#e3072a","#10a8b0")
+```
+
+Test for variables shaping differentiation across communities with different beta diversity indeces. 
+```{r}
+dist=function(OTU,tree){
+  #Get Sorensen and Bray-Curtis distances
+  distances=list(dist_soren=vegdist(OTU,method="bray",binary=T),
+               dist_bray=vegdist(OTU,method="bray",binary=F))
+  
+  #Get unifrac distances:
+  #1. Load tree and removed branches out of subset
+  tree=read_tree(treefile)
+  drop=tree$tip.label[!(tree$tip.label%in%colnames(OTU))]
+  tree.new=drop.tip(tree,drop)
+  if (dim(OTU)[2]!=length(tree.new$tip.label)){
+    warning("Check OTU table and treefile")
+  }
+  #2. Load tree, OTU and taxa as phyloseq data
+  taxa_s=taxa[match(colnames(OTU),rownames(taxa)),]
+  phylo_data=phyloseq(sample_data(metadata),
+                      otu_table(t(OTU),taxa_are_rows=T),
+                      phy_tree(tree.new),tax_table(taxa_s))
+  #3. Calculate distances and append to distances list
+  distances$unifrac=phyloseq::distance(phylo_data,method="unifrac")
+  distances$wunifrac=phyloseq::distance(phylo_data,method="wunifrac")
+  distances
+}
+
+
+distances=dist(OTU_tabl,treefile)
+
+
+#PCoA
+PCoA_all=function(x){
+  pcoa.x=cmdscale(x,eig=T)
+  #add percentage of variation explained by each of the first two axis
+  pcoa.x$v=c(round(pcoa.x$eig[1]/sum(pcoa.x$eig)*100),
+              round(pcoa.x$eig[2]/sum(pcoa.x$eig)*100))
+  pcoa.x
+}
+
+ord=lapply(distances,PCoA_all)
+str(ord)
+
+#Check that order of points is the same for the different measures
+head(rownames(ord$dist_soren$points))
+head(rownames(ord$unifrac$points))
+
+#Plot ordinations
+shapes=c(19,1)
+par(oma=c(1, 1, 1, 8), xpd=TRUE)
+par(mar=c(4,4,4,4))
+par(mfrow=c(2,2))
+
+for (i in 1:4){
+    plot(ord[[i]]$points,pch=shapes[metadata$Pollinator],col=cols[metadata$Organ],
+       xlab=paste("PCoA1(",ord[[i]]$v[1],"%)",sep=""),
+       ylab=paste("PCoA2 (",ord[[i]]$v[2],"%)",sep=""), main=names(ord)[i])
+}
+
+#Add legend to the 4-way plot
+par(fig = c(0, 1, 0, 1), oma = c(0, 0, 0, 0), mar = c(0, 0, 0, 0), new = TRUE)
+plot(0, 0, type = "n", bty = "n", xaxt = "n", yaxt = "n")
+legend(0.58,0.85,legend=c("Anthers","Petals","Style"),pch=19,col=cols,bty ="n",cex=1.2)
+legend(0.58,0.55, legend=levels(metadata$Pollinator),pch=c(1,19),bty ="n",cex=1.2)
+
+dev.off()
+par(mar=c(4,4,1,8))
+plot(ord[[3]]$points,pch=shapes[metadata$Pollinator],col=cols[metadata$Organ],
+       xlab=paste("PCoA1(",ord[[3]]$v[1],"%)",sep=""),
+       ylab=paste("PCoA2 (",ord[[3]]$v[2],"%)",sep=""))
+par(xpd=NA)
+legend(0.3,0.32,legend=c("Anthers","Petals","Style"),pch=15,
+       col=cols,bty ="n",cex=1.2)
+legend(0.3,0.2, legend=levels(metadata$Pollinator),pch=c(1,19),bty ="n",cex=1.2)
+
+dev.off()
+par(mar=c(4,4,1,8))
+seep_col=c("#f69053","#def2b4","#91cba9","#2b83ba","#d7191c")
+plot(ord[[3]]$points,pch=shapes[metadata$Pollinator],col=seep_col[metadata$Seep],
+       xlab=paste("PCoA1(",ord[[3]]$v[1],"%)",sep=""),
+       ylab=paste("PCoA2 (",ord[[3]]$v[2],"%)",sep=""))
+par(xpd=NA)
+legend(0.3,0.32,legend=levels(metadata$Seep),pch=15,
+       col=seep_col,bty ="n",cex=1.2)
+legend(0.3,0.1, legend=levels(metadata$Pollinator),pch=c(1,19),bty ="n",cex=1.2)
+
+#############################################################
+########## Test differences between organs and seep##########
+#############################################################
+#Permanovas
+permanovas=vector("list",4L)
+for (i in 1:4){
+  permanovas[[i]]=adonis(distances[[i]]~metadata$Organ*metadata$Pollinator+metadata$Organ*metadata$Seep+metadata$Pollinator*metadata$Seep)
+}
+
+permanovas_nopol=vector("list",4L)
+permanovas_nopol=vector("list",4L)
+for (i in 1:4){
+  permanovas_nopol[[i]]=adonis(distances[[i]]~metadata$Organ*metadata$Seep)
+}
+
+
+#Beta-disperser (test assumptions for permanova)
+betadisp=vector("list",4L)
+for (i in 1:4){
+  betadisp[[i]]=betadisper(distances[[i]], metadata$Organ, bias.adjust = FALSE, sqrt.dist = FALSE, add = FALSE)
+}
+
+#Plot
+shapes=c(0,16,17,15,1)
+par(oma=c(1, 1, 1, 8), xpd=TRUE)
+par(mar=c(4,4,4,4))
+par(mfrow=c(2,2))
+
+for (i in 1:4){
+  boxplot(betadisp[[i]], col=cols, main=names(ord)[i])
+}
+
+par(fig = c(0, 1, 0, 1), oma = c(0, 0, 0, 0), mar = c(0, 0, 0, 0), new = TRUE)
+plot(0, 0, type = "n", bty = "n", xaxt = "n", yaxt = "n")
+legend(0.6,0.8,legend=c("Anthers","Petals","Style"),pch=15,col=cols,bty ="n",cex=1.2)
+
+lapply(betadisp,permutest)
+
+
+metadata$bray_betadisp=betadisp[[3]]$distances
+
+```
+
+
+Obtain distances and model fit for pollinator no pollinator
+```{r}
+
+pol.meta=metadata[metadata$Pollinator=="WP",]
+sub.pol=pol.meta$SampleID
+OTU.pol=OTU_tabl[match(as.character(sub.pol),rownames(OTU_tabl)),]
+
+dist.pol=dist(OTU.pol,treefile)
+
+perm.pol=vector("list",4L)
+for (i in 1:4){
+  perm.pol[[i]]=adonis(dist.pol[[i]]~pol.meta$Organ*pol.meta$Seep)
+}
+
+npol.meta=metadata[metadata$Pollinator=="NP",]
+sub.npol=npol.meta$SampleID
+OTU.npol=OTU_tabl[match(as.character(sub.npol),rownames(OTU_tabl)),]
+
+dist.npol=dist(OTU.npol,treefile)
+
+perm.npol=vector("list",4L)
+for (i in 1:4){
+  perm.npol[[i]]=adonis(dist.npol[[i]]~npol.meta$Organ*npol.meta$Seep)
+}
+
+Rpol=unlist(lapply(perm.pol, function(x) {x$aov.tab$R2[c(1:3)]*100}))
+Rnpol=unlist(lapply(perm.npol, function(x) {x$aov.tab$R2[c(1:3)]*100}))
+
+r_comp=data.frame(R=c(Rpol,Rnpol),Pol=rep(c("WP","NP"),each=12),
+                  Factor=rep(c("Organ","Seep","Organ*Seep"),8),
+                  index=rep(rep(c("Sorensen","Bray-Curtis",
+                                  "Unifrac","Weighted Unifrac"),each=3),2))
+
+ggplot(r_comp[r_comp$Factor=="Organ",],aes(x=index,y=R,colour=Pol,shape=Pol))+
+  geom_point(size=3)+
+  xlab("Beta diversity index")+
+  ylab("% variation explained by 'Organ'")+
+  scale_colour_manual(values=c("gray50","gray20"))+
+  scale_shape_manual(values=c(1,19))+
+  theme_bw()
+
+```
+
+
+Plot relative abundance of most abundant taxa (order level) by organ and pollinator treatment. 
+```{r}
+#Open taxa table as data.frame
+taxa_s_df=as.data.frame(taxa)
+
+#Calculate relative abundances for each OTU
+OTU_relab=OTU_tabl/rowSums(OTU_tabl)
+#sanity check
+rowSums(OTU_relab)
+
+# Merge taxa and OTU table 
+OTU_tax=merge(taxa,t(OTU_relab),by=0)
+#OTU_tax=OTU_tax[order(rowSums(OTU_tax[,9:ncol(OTU_tax)]),decreasing=T),]
+
+
+#Sum relative abundances of OTUs within each order to get an order level relative abundance. 
+By_Order=function(x){
+  tapply(x,OTU_tax$Order,sum)
+}
+
+avg_relab_ord=as.data.frame(lapply(OTU_tax[,9:ncol(OTU_tax)],By_Order))
+
+#Obtain order names and assign to new column
+avg_relab_ord$Order=substr(rownames(avg_relab_ord),4,stop=20)
+
+#Re-fromat data frame for substet and plotting
+av_rab=gather(avg_relab_ord,SampleID,avg_rab,X294:X540)
+av_rab$SampleID=substr(av_rab$SampleID,2,4)
+
+#Subset only orders of more than 25% across samples
+x=tapply(av_rab$avg_rab,av_rab$Order,sum)
+av_rab=av_rab[av_rab$Order%in%names(x)[x>=0.25],]
+
+phyl_data=merge(metadata,av_rab)
+
+ggplot(data=phyl_data, aes(x=reorder(Order,avg_rab),y=avg_rab, fill=Organ))+
+  geom_boxplot(outlier.shape = NA)+
+  geom_point(shape=21, alpha=0.6)+
+  facet_grid(Organ~Pollinator)+
+  stat_smooth(method = "lm", se=F)+
+  ylab("Relative abundance")+
+  xlab(NULL)+
+  scale_fill_manual(values=cols)+
+  theme_bw()+
+  theme(axis.text.x=element_text(angle=45,hjust=1))
+
+
+```
+
+
+Beta diversity differences across pollinator and organ treatment, and across open styles
+```{r}
+dev.off()
+beta.pol=betadisper(distances[[2]], paste(metadata$Organ,metadata$Pollinator), bias.adjust = FALSE, sqrt.dist = FALSE, add = FALSE)
+
+# Permutation test for homogeneity of multivariate dispersions
+# Permutation: free
+# Number of permutations: 999
+# 
+# Response: Distances
+#           Df  Sum Sq  Mean Sq      F N.Perm Pr(>F)   
+# Groups     5 0.23652 0.047303 3.8721    999  0.003 **
+# Residuals 86 1.05062 0.012217                        
+# ---
+# Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1
+
+col.new=c("gray30","#FF7573")
+boxplot(beta.pol, col=col.new)
+permutest(beta.pol)
+TukeyHSD(beta.pol)
+
+#  Tukey multiple comparisons of means
+#     95% family-wise confidence level
+# 
+# Fit: aov(formula = distances ~ group, data = df)
+# 
+# $group
+#                               diff          lwr          upr     p adj
+# Anthers WP-Anthers NP  0.073403908  0.004815252  0.141992563 0.0287529
+# Petals NP-Anthers NP   0.021854744 -0.046733911  0.090443399 0.9379943
+# Petals WP-Anthers NP  -0.006281573 -0.077201195  0.064638049 0.9998387
+# Style NP-Anthers NP    0.038209525 -0.032710097  0.109129147 0.6199702
+# Style WP-Anthers NP    0.048595835 -0.019009655  0.116201324 0.2995271
+# Petals NP-Anthers WP  -0.051549164 -0.119022482  0.015924154 0.2363343
+# Petals WP-Anthers WP  -0.079685481 -0.149527000 -0.009843961 0.0158649
+# Style NP-Anthers WP   -0.035194383 -0.105035902  0.034647137 0.6847507
+# Style WP-Anthers WP   -0.024808073 -0.091281731  0.041665585 0.8849481
+# Petals WP-Petals NP   -0.028136317 -0.097977837  0.041705203 0.8478077
+# Style NP-Petals NP     0.016354781 -0.053486739  0.086196300 0.9834373
+# Style WP-Petals NP     0.026741091 -0.039732567  0.093214749 0.8485859
+# Style NP-Petals WP     0.044491098 -0.027640913  0.116623109 0.4725170
+# Style WP-Petals WP     0.054877408 -0.013998832  0.123753648 0.1964757
+# Style WP-Style NP      0.010386310 -0.058489930  0.079262550 0.9978568
+
+
+
+
+```
+
+Geography-Bray Curtis: Chose Bray-Curtis because under neutral model of dispersal we would not expect particularly strong signal of phylogeny and we do not expect 
+```{r}
+#Create pairwise indexes of sample and location
+id.grid=expand.grid(metadata$SampleID,metadata$SampleID)
+id.new=paste(id.grid$Var1,id.grid$Var2, sep="_")
+loc.grid=expand.grid(paste(metadata$Seep,metadata$Loc, sep="."),paste(metadata$Seep,metadata$Loc,sep="."))
+loc.new=paste(loc.grid$Var1,loc.grid$Var2, sep="_")
+
+############## Subset by pollinator 
+Organs=c("Anthers","Petals","Style")
+  
+bray.all=function(x){
+  sub.pol=metadata[metadata$Pollinator==x,]
+  bray.pol <- vector("list", 3)
+  for (i in 1:3){
+  #Subset by organ
+  subset=sub.pol$SampleID[sub.pol$Organ==Organs[i]]
+  OTU=OTU_tabl[match(as.character(subset),rownames(OTU_tabl)),]
+  #Remove OTUs not present  
+  not_0=colSums(OTU)>0
+  OTU_clean=OTU[,not_0]
+  #Calculate distance matrix and save as matrix for easier re-formating
+  matrices = as.matrix(vegdist(OTU_clean))
+    #Create data.frames
+    bray.pol[[i]]=data.frame(Dist=as.vector(matrices),
+                                      Id.row=rep(rownames(matrices),ncol(matrices)),
+                                      Id.col=rep(colnames(matrices),each=nrow(matrices)),
+                                      id.new=paste(rep(rownames(matrices),ncol(matrices)),
+                                                   rep(colnames(matrices),each=nrow(matrices)),sep="_"),
+                                      Organ=rep(Organs[i],ncol(matrices)*nrow(matrices)), stringsAsFactors = F)
+  }
+bray.data=data.frame(rbind(bray.pol[[1]],bray.pol[[2]],bray.pol[[3]]))
+bray.data$Pollinator=rep(x,nrow(bray.data))
+bray.data
+}
+
+bray.pol=bray.all("WP")
+bray.npol=bray.all("NP")
+bray.pol.orgs=data.frame(rbind(bray.pol,bray.npol))
+
+bray.pol.orgs$loc.id=loc.new[match(bray.pol.orgs$id.new,id.new)]
+
+#OPEN GEOGRAPHICAL, MERGE DATA AND PLOT!
+geo=read.csv("Geographic/DistanceMatLong.csv")
+
+geo$loc.id=paste(paste(geo$Seep1,geo$Loc1, sep="."),paste(geo$Seep2,geo$Loc2, sep="."), sep="_")
+dist.pol.data=merge(bray.pol.orgs,geo)
+
+bray.data.no0=dist.pol.data[dist.pol.data$Dist!=0,]
+
+
+#Plot geographic distance by organ
+ggplot(data=bray.data.no0, aes(x=Distance,y=Dist, colour=Pollinator))+
+  geom_point(alpha=0.6,size=0.5)+
+  facet_wrap(~Organ)+
+  stat_smooth(method = "lm", se=F)+
+  ylab("Bray-curtis")+
+  xlab("Distance (m)")+
+  scale_color_manual(values=c("gray30","#FF7573"))+
+  theme_bw()
+
+```
+
+Mantel tests
+```{r}
+#Change format of geographic data to matrix for each sample
+Geo_batch=function(df,x){
+  sub.pol=df[df$Pollinator==x,]
+  geo=sub.pol[,c(3,4,12)]
+  temp.list=split(geo,sub.pol$Organ)
+  geo_wide=lapply(temp.list,spread,key=Id.col,Distance)
+  geo_wide_sm=lapply( geo_wide, function(x) { x["Id.row"] <- NULL; x })
+  geo_mat=lapply(geo_wide_sm,as.matrix,dimnames=list(geo_wide_sm[1],geo_wide_sm[1]))
+  dist=sub.pol[,c(2,3,4)]
+  temp.list2=split(dist,sub.pol$Organ)
+  dist_wide=lapply(temp.list2,spread,key=Id.col,Dist)
+  dist_wide_sm=lapply(dist_wide, function(x) { x["Id.row"] <- NULL; x })
+  dist_mat=lapply(dist_wide_sm,as.matrix,dimnames=list(geo_wide_sm[1],geo_wide_sm[1]))
+  mapply(mantel,geo_mat,dist_mat,SIMPLIFY = F)
+}
+
+
+Geo_batch(dist.pol.data,"WP")
+Geo_batch(dist.pol.data,"NP")
+
+#None significant at 0.05 NP
+#Anther WP
+#Mantel statistic r: 0.2659 
+      #Significance: 0.038
+
+```
+
+
+Repeat distance analysis and mantel test for leaves as reference
+```{r}
+#Open processed reads from OTUtable_Processing
+OTU_rel_leaves=read.table(file="16s/OTU_leaves.txt",sep="\t",check.names = F)
+
+
+#Get metadadata in same order for correct labeling 
+ml=match(rownames(OTU_rel_leaves),as.character(mymap$SampleID))
+meta_leaf=(mymap[ml,])
+nrow(meta_leaf)
+head(meta_leaf)
+
+id.grid_l=expand.grid(meta_leaf$SampleID,meta_leaf$SampleID)
+id.new_l=paste(id.grid_l$Var1,id.grid_l$Var2, sep="_")
+loc.grid_l=expand.grid(paste(meta_leaf$Seep,meta_leaf$Loc, sep="."),paste(meta_leaf$Seep,meta_leaf$Loc,sep="."))
+loc.new_l=paste(loc.grid_l$Var1,loc.grid_l$Var2, sep="_")  
+
+leaf_dist=as.matrix(vegdist(OTU_rel_leaves))
+bray.leaf=data.frame(Dist=as.vector(leaf_dist),
+                     Id.row=rep(rownames(leaf_dist),ncol(leaf_dist)),
+                     Id.col=rep(colnames(leaf_dist),each=nrow(leaf_dist)),
+                     id.new=paste(rep(rownames(leaf_dist),ncol(leaf_dist)),
+                                  rep(colnames(leaf_dist),each=nrow(leaf_dist)),sep="_"),
+                     Organ=rep("Leaf",ncol(leaf_dist)*nrow(leaf_dist)),
+                     Pollinator=rep("NP",ncol(leaf_dist)*nrow(leaf_dist)), stringsAsFactors = F)
+
+
+bray.leaf$loc.id=loc.new_l[match(bray.leaf$id.new,id.new_l)]
+dist.leaf.data=merge(bray.leaf,geo)
+
+leaf_bray.no0=dist.leaf.data[dist.leaf.data$Dist!=0,]
+
+new_geo=rbind(bray.data.no0,leaf_bray.no0)
+new_geo$Organ <- factor(new_geo$Organ, levels = c("Anthers", "Petals", "Style","Leaf"))
+
+#Plot geographic distance by organ
+ggplot(data=new_geo, aes(x=Distance,y=Dist, colour=Pollinator))+
+  facet_wrap(~Organ,ncol=4)+
+  geom_point(alpha=0.6,size=0.5)+
+  stat_smooth(method = "lm", se=F)+
+  scale_color_manual(values=c("gray30","#FF7573"))+
+  ylab("Bray-curtis")+
+  xlab("Distance (m)")+
+  theme_bw()
+
+
+geoL=dist.leaf.data[,c(3,4,12)]
+geo_wide=spread(geoL,key=Id.col,Distance)
+geo_wide["Id.row"]=NULL
+geo_mat=as.matrix(geo_wide,dimnames=list(geo_wide[1],geo_wide[1]))
+dist=dist.leaf.data[,c(2,3,4)]
+dist_wide=spread(dist,key=Id.col,Dist)
+dist_wide["Id.row"]=NULL
+dist_mat=as.matrix(dist_wide,dimnames=list(geo_wide[1],geo_wide[1]))
+mantel(geo_mat,dist_mat)
+
+
+```
+
+
+Distance between pollinator and no-pollinator samples
+```{r}
+pairs=read.csv("../Metadata/PollinatorPairs.csv")
+pairs$Pollinator=as.character(pairs$Pollinator)
+pairs$No.Pollinator=as.character(pairs$No.Pollinator)
+
+#Make distance into matrix object
+M=as.matrix(distances[[3]])
+pol.pairs=M[rownames(M)%in%pairs$No.Pollinator,rownames(M)%in%pairs$Pollinator]
+
+#Sanity check
+rownames(pol.pairs)==pairs$No.Pollinator
+colnames(pol.pairs)==pairs$Pollinator
+
+pairs$beta=diag(pol.pairs)
+
+
+ggplot(pairs, aes(x=Organ, y=beta, fill=Organ))+
+  geom_boxplot()+
+  geom_jitter(shape=21)+
+  xlab("Flower structure")+
+  ylab("Pair-wise beta diversity")+
+  scale_fill_manual(values=cols)+
+  theme_bw()
+
+ax=aov(beta~Organ,data=pairs)
+summary(ax)
+
+```
+
+To process pollinator data:
+```{r}
+pol_wide <- spread(pol, Mimulus, Visits)
+pol_wide$In[is.na(pol_wide$In)]=0
+pol_wide$No[is.na(pol_wide$No)]=0
+pol_wide$Out[is.na(pol_wide$Out)]=0
+pol_wide$tot=pol_wide$In+pol_wide$No+pol_wide$Out
+pol_wide$mimul=pol_wide$In+pol_wide$Out
+
+pol_wide$time_ID=paste(pol_wide$Block,pol_wide$Time, sep="_")
+pol_wide=na.omit(pol_wide)
+
+
+pol.sums=ddply(pol_wide,c("Location","Seep","time_ID"),summarise,tot=sum(tot),
+              In=sum(In),Out=sum(Out),mimul=sum(mimul))
+
+#To make figure S6 
+totalOut=tapply(pol_wide$Out, pol_wide$FuncionalGroup, sum)
+totalIn=tapply(pol_wide$In, pol_wide$FuncionalGroup, sum)
+
+table_cont=cbind(totalIn,totalOut)
+chisq.test(table_cont)
+fisher.test(table_cont,simulate.p.value=TRUE,B=10000)
+
+Percentage=c((totalOut/sum(totalOut)*100), (totalIn/sum(totalIn)*100))
+
+data_prop=data.frame(Group=names(totalIn),Percentage,
+                     type=rep(c("Out","In"),each=14))
+
+data_prop$type <- factor(data_prop$type, levels =c("Out","In"))
+data_prop$Group <- factor (data_prop$Group, 
+                           levels=c("XS","LS","SB","MB","LB","LL",
+                                    "BF","SF","LF","FL","LE",
+                                    "BE","VE","OT"))
+col_pol=c("#d73027","#a50026","#f46d43","#fdae61","#fee090","#ffffbf",
+          "#e0f3f8","#abd9e9","#4575b4","#313695","#F5F1DE",
+          "gray20","gray50","gray80")
+
+ggplot(data_prop,aes(y=Percentage,x=type,fill=Group))+
+  geom_bar(stat = "identity")+
+  scale_fill_manual(values=col_pol)+
+  theme_bw()
+
+
+
+#Multiply times 4 to get hour rate. 
+pol.new=ddply(pol.sums,c("Location","Seep"),summarise,mean_visits=mean(tot)*4,
+              mean_in=mean(In)*4,mean_out=mean(Out)*4,
+              mean_mimul=mean(mimul)*4)
+
+pol.new$Loc=as.factor(pol.new$Location)
+pairs_pol=merge(pairs,pol.new)
+
+#Make long format for plot
+pairs_pol_long=gather(pairs_pol,pol_type,visits,c(mean_visits,mean_in,mean_mimul))
+
+pairs_pol_long$pol_type=factor(pairs_pol_long$pol_type, levels=c("mean_visits","mean_mimul","mean_in"))
+
+ggplot(pairs_pol_long, aes(x=visits, y=beta, color=Organ, shape=Organ))+
+  facet_grid(~pol_type, scales="free_x")+
+  geom_point()+
+  stat_smooth(method="lm", se=F)+
+  ylab("Difference")+
+  xlab("Mean number of visits")+
+  scale_color_manual(values=cols)+
+  theme_bw()
+
+pairslist=split(pairs_pol,pairs_pol$Organ)
+
+models_tot=lapply(pairslist, lm, formula=beta~mean_visits)
+sum_tot=lapply(models_tot,summary)
+
+models_mimul=lapply(pairslist, lm, formula=beta~mean_mimul)
+sum_mim=lapply(models_mimul,summary)
+
+models_in=lapply(pairslist, lm, formula=beta~mean_in)
+sum_in=lapply(models_in,summary)
+
+
+#Wrote summary of all models in single table file
+models_sum=read.csv("PairwiseBeta_models.csv")
+models_sum$Organ=factor(models_sum$Organ, levels=c("Stamens","Petals","Style"))
+models_sum$Type_visitor=factor(models_sum$Type_visitor,levels=c("Total","Flower","Flower_in"))
+
+
+models_sum=models_sum[models_sum$Type_visitor!="Total",]
+models_sum$num=as.numeric(models_sum$Type_visitor)-1
+
+ggplot(models_sum, aes(x=Type_visitor, y=R2, fill=Organ, shape=Organ))+
+  geom_point(size=4)+
+  #geom_line(aes(x=num,colour=Organ))+
+  ylab(expression(R^2))+
+  xlab("Type of visitor")+
+  scale_color_manual(values=cols)+
+  scale_shape_manual(values=c(21,24,22))+
+  scale_fill_manual(values=cols)+
+  theme_bw()
+
+pd=position_dodge(0.3)
+ggplot(models_sum, aes(x=Type_visitor, y=Estimate,fill=Organ,shape=Organ))+
+  geom_errorbar(aes(ymin=Estimate-1.96*SE,ymax=Estimate+1.96*SE),position = pd, color="black",width=0.2)+
+  #geom_line(aes(x=num, color=Organ),position = pd)+
+  geom_point(position = pd, size=2)+
+  ylab("slope estimates (pairwise beta-diversity/visit rate)")+
+  xlab("Type of visitor")+
+  geom_hline(yintercept = 0,linetype=2)+
+  scale_color_manual(values=cols)+
+  scale_fill_manual(values=cols)+
+  scale_shape_manual(values=c(21,24,22))+
+  theme_bw()
+```
+
+
+Make Venn-Diagrams with core microbiome and calculate phylogenetic distance
+```{r}
+# 1. Unique samples
+Organs=c("Anthers","Petals","Style")
+
+uniqueOTU=function(x,p){
+  OTU_list=vector(mode="list",length = 3L)
+  sub.pol=metadata[metadata$Pollinator==x,]
+  for (i in 1:3){
+    subset=sub.pol$SampleID[sub.pol$Organ==Organs[i]]
+    OTU=OTU_tabl[match(as.character(subset),rownames(OTU_tabl)),]
+    OTU_pa=(OTU>0)*1
+    OTU_list[[i]]=colnames(OTU_pa)[colSums(OTU_pa)/nrow(OTU_pa)>p]
+  }
+  OTU_list
+}
+
+prop=seq(0,1,by=0.1)
+
+Shared=function(p,pol){
+  M=matrix(ncol=2,nrow=length(p), dimnames=list(p,c("N","NShared")))
+  for (i in 1:length(p)){
+    uni=uniqueOTU(pol,p[i])
+    if (length(uni[[1]])==0&length(uni[[2]])==0&length(uni[[3]])==0){
+      M[i,1]=0
+      M[i,2]=0
+    } else {
+      over=get.venn.partitions(uni)
+      M[i,1]=sum(over$..count..)
+      M[i,2]=sum(over$..count..[c(4,6,7)])/M[i,1]
+    }
+  }
+  M
+}
+
+pol_uniqueOTU=Shared(prop,"WP")
+npol_uniqueOTU=Shared(prop,"NP")
+
+prop_shared=data.frame(rbind(pol_uniqueOTU,npol_uniqueOTU))
+prop_shared$p=rep(prop,2)
+prop_shared$Pollinator=rep(c("WP","NP"),each=length(prop))
+
+
+
+ggplot(prop_shared,aes(x=p,y=N,colour=Pollinator))+
+  geom_point()+
+  geom_line()+
+  xlab("Minimal proportion of samples with OTU present")+
+  ylab("Total number of OTUs")+
+  scale_color_manual(values=c("gray80","gray20"))+
+  theme_bw()
+
+ggplot(prop_shared,aes(x=p,y=log(N),colour=Pollinator))+
+  geom_point()+
+  stat_smooth(method="lm")+
+  xlab("Minimal proportion of samples with OTU present")+
+  ylab("log(Total number of OTUs)")+
+  scale_color_manual(values=c("gray80","gray20"))+
+  theme_bw()
+
+ggplot(prop_shared,aes(x=p,y=NShared,colour=Pollinator))+
+  geom_point()+
+  geom_line()+
+  ylab("OTUs present in only one floral organ")+
+  xlab("Minimal proportion of samples with OTU present")+
+  scale_color_manual(values=c("gray80","gray20"))+
+  theme_bw()
+   
+#Calculate core microbiome at 20% shared across samples of a determinate organ and pollinator treatment. 
+pol_uniqueOTU=uniqueOTU("WP",0.20)
+npol_uniqueOTU=uniqueOTU("NP",0.20)
+
+pol_part=get.venn.partitions(pol_uniqueOTU)
+npol_part=get.venn.partitions(npol_uniqueOTU)
+
+count.mat=matrix(c(sum(pol_part$..count..[c(4,6,7)]),
+                   sum(npol_part$..count..[c(4,6,7)]),
+                   sum(pol_part$..count..[c(1:3,5)]),
+                   sum(npol_part$..count..[c(1:3,5)])),ncol=2)
+
+fisher.test(count.mat)
+
+
+#
+tree=read_tree(treefile)
+drop=tree$tip.label[!(tree$tip.label%in%colnames(OTU_tabl))]
+tree.new=drop.tip(tree,drop)
+
+
+
+#Calculate expected phylogenetic distance and variance
+E_pd=expected.pd(tree.new)
+V_pd=variance.pd(tree.new,upper.bound = F)
+#Variance takes a long time to compute so it is better to save for future analyses
+#write.csv(E_pd, "expected_pd.csv")
+#write.csv(V_pd, "variance_expectedpd.csv")
+
+z_pd=function (x){
+  #1. Make new OTU table sampling
+  mat=matrix(rep(1,length(x)),nrow=1,
+           dimnames=list("samp",x))
+  #2. Calculate observed pd
+  PD=pd(mat,tree,include.root = F)
+  #3. Calculate standarized deviation
+  ex=E_pd$expected.pd[PD$SR]
+  sd=sqrt(V_pd$variance.pd[PD$SR])
+  Z=(PD$PD-ex)/sd
+  Z
+}
+
+z_pol=unlist(lapply(pol_uniqueOTU,z_pd))
+z_npol=unlist(lapply(npol_uniqueOTU,z_pd))
+part_data=data.frame(Organ=rep(c("Stamens","Petals","Style"),2),
+                     Pollinator=rep(c("WP","NP"),each=3),
+                     z=c(z_pol,z_npol))
+
+ggplot(part_data,aes(x=Organ,y=z,colour=Organ,shape=Pollinator))+
+  geom_point(size=3)+
+  geom_hline(aes(yintercept=-1.96),linetype="dashed")+
+  geom_hline(aes(yintercept=1.96),linetype="dashed")+
+  geom_hline(aes(yintercept=0))+
+  ylab("Deviation from expectation (standarized effect sizes)")+
+  scale_color_manual(values=cols)+
+  scale_shape_manual(values=c(1,19))+
+  theme_bw()
+  
+
+```
+
+
+
+
+```{r}
+#Soil samples
+subsoil=mymap$SampleID[mymap$Organ=="Soil"]
+OTU_soil=Rarefied_OTU[match(as.character(subsoil),rownames(Rarefied_OTU)),]
+
+#Remove OTUs not present  
+not_0s=colSums(OTU_soil)>0
+ncol(OTU_soil)-sum(not_0s)
+OTU_soil_clean=OTU_soil[,not_0s]
+dim(OTU_soil_clean)
+
+write.table(OTU_soil_clean,file="16s/OTU_soil.txt",sep="\t")
+
+#Leaves samples
+subleave=mymap$SampleID[mymap$Organ=="Leaves"]
+OTU_leaves=Rarefied_OTU[match(as.character(subleave),rownames(Rarefied_OTU)),]
+
+#Remove OTUs not present  
+not_0l=colSums(OTU_leaves)>0
+ncol(OTU_leaves)-sum(not_0l)
+OTU_leaves_clean=OTU_leaves[,not_0l]
+dim(OTU_leaves_clean)
+
+write.table(OTU_leaves_clean,file="16s/OTU_leaves.txt",sep="\t")
+
+
+#Community samples
+subcom=mymap$SampleID[mymap$Organ=="Community"]
+OTU_com=Rarefied_OTU[match(as.character(subcom),rownames(Rarefied_OTU)),]
+remove=which(is.na(rownames(OTU_com)))
+OTU_com=OTU_com[-remove,]
+
+#Remove OTUs not present  
+not_0c=colSums(OTU_com)>0
+ncol(OTU_com)-sum(not_0c)
+OTU_com_clean=OTU_com[,not_0c]
+dim(OTU_com_clean)
+
+write.table(OTU_com_clean,file="16s/OTU_community.txt",sep="\t")
+
+
+```
+
+
