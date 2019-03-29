@@ -1,8 +1,3 @@
----
-title: Sequence processing
----
-
-
 ##Paper: Floral organs act as environmental filters and interact with pollinators to structure the yellow monkeyflower (Mimulus guttatus) floral microbiome. 
 ###Code by: María Rebolleda Gómez
 ####Last updated: March 2018
