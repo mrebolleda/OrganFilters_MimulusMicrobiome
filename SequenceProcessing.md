@@ -5,7 +5,8 @@
 ## Data processing protocol
 1. Download data and check quality
 ```{bash eval=FALSE}
-parent_dir=/home/mariargz/Desktop/MimulusMicrobiome
+#Set main directory for project
+parent_dir=directory/for/project
 
 cd $parent_dir
 cd $parent_dir/raw
