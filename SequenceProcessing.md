@@ -1,8 +1,8 @@
-##Paper: Floral organs act as environmental filters and interact with pollinators to structure the yellow monkeyflower (Mimulus guttatus) floral microbiome. 
-###Code by: María Rebolleda Gómez
-####Last updated: March 2018
+## Paper: Floral organs act as environmental filters and interact with pollinators to structure the yellow monkeyflower (Mimulus guttatus) floral microbiome. 
+### Code by: María Rebolleda Gómez
+#### Last updated: March 2018
 
-##Data processing protocol
+## Data processing protocol
 1. Download data and check quality
 ```{bash eval=FALSE}
 parent_dir=/home/mariargz/Desktop/MimulusMicrobiome
